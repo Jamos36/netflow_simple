@@ -1,0 +1,17 @@
+# Environment and caches
+.venv/
+__pycache__/
+.pytest_cache/
+.tmp/
+
+# Data, outputs, models and DuckDB spill files never go into git
+*.parquet
+*.csv
+*.joblib
+*.duckdb
+*.duckdb.wal
+data/
+output/
+outputs/
+work/
+duckdb_spill/
