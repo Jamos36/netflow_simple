@@ -126,14 +126,16 @@ def input_day_range(con, input_glob):
     return parse_day(first.isoformat()), parse_day(last.isoformat()) + timedelta(days=1)
 
 
-def build_period_features(con, input_glob, period, start, end, out_dir, bounded_end=True):
+def build_period_features(con, input_glob, period, start, end, out_dir, window_minutes, bounded_end=True):
     """Write one feature Parquet per UTC day of [start, end) to out_dir/period/. Replaces earlier output.
+
+    window_minutes comes from config.py in develop and from the saved model in test/score.
 
     With bounded_end, flows that end at or after `end` are excluded (and counted), so activity completed in a
     later period cannot enter this one. A completed long flow is attributed to its start window (retrospective).
     """
-    if (24 * 60) % config.WINDOW_MINUTES:
-        raise SystemExit("WINDOW_MINUTES must divide 24 hours")
+    if (24 * 60) % window_minutes:
+        raise SystemExit(f"Window of {window_minutes} minutes must divide 24 hours")
     period_dir = Path(out_dir) / period
     if period_dir.exists():
         shutil.rmtree(period_dir)
@@ -143,8 +145,8 @@ def build_period_features(con, input_glob, period, start, end, out_dir, bounded_
     while day < end:
         query = DAY_FEATURE_SQL.format(
             files=sql_text(input_glob), day_start=sql_time(day), day_end=sql_time(day + timedelta(days=1)),
-            completion_rule=completion_rule, window_s=config.WINDOW_MINUTES * 60,
-            window_minutes=config.WINDOW_MINUTES, period=period)
+            completion_rule=completion_rule, window_s=window_minutes * 60,
+            window_minutes=window_minutes, period=period)
         con.execute(f"COPY ({query}) TO {sql_text(period_dir / f'{day:%Y-%m-%d}.parquet')} (FORMAT parquet)")
         day += timedelta(days=1)
 

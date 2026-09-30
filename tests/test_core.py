@@ -1,11 +1,15 @@
 """A few substantive checks on tiny temporary Parquet fixtures (not a data generator for users)."""
 
+import json
+import shutil
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import duckdb
 import joblib
+import matplotlib.image
+import pandas as pd
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -75,7 +79,8 @@ def test_host_window_split_across_files_is_aggregated_once(tmp_path, monkeypatch
     write_flows(tmp_path / "b.parquet", [("h1", "d2", 443, 17, 300, 1, t, t), ("h1", "d3", 80, 6, 100, 5, t, t)])
     use_settings(monkeypatch, tmp_path, str(tmp_path / "*.parquet"))
     con = features.connect()
-    info = features.build_period_features(con, config.INPUT_GLOB, "train", DAY0, DAY0 + timedelta(days=1), tmp_path)
+    info = features.build_period_features(con, config.INPUT_GLOB, "train", DAY0, DAY0 + timedelta(days=1),
+                                          tmp_path, 15)
     row = con.execute(f"SELECT * FROM read_parquet('{tmp_path / 'train' / '*.parquet'}')").fetchdf().iloc[0]
     assert info["host_windows"] == 1
     assert (row.flows, row.uniq_dst_ip, row.uniq_dst_port, row.bytes_total) == (4, 3, 2, 600)
@@ -116,7 +121,7 @@ def test_batch_size_does_not_change_scores_and_empty_candidates_still_report(tmp
 
 def test_tied_thresholds_and_percentile_saturation():
     reference = np.sort(np.array([0.5] * 995 + [0.6] * 5))
-    calibration = model.calibrate(reference, validation_rows=1000, validation_days=1)
+    calibration = model.calibrate(reference, 1000, 1, config.REVIEW_QUANTILES)
     assert calibration["thresholds"]["Critical"] == calibration["thresholds"]["High"] == 0.6
     assert calibration["reference_band_counts"]["Critical"] == 5 and calibration["reference_band_counts"]["High"] == 0
     assert list(model.assign_bands(np.array([0.6, 0.55, 0.4]), calibration["thresholds"])) == \
@@ -138,3 +143,62 @@ def test_missing_required_column_fails_clearly(tmp_path):
     pq.write_table(pa.table({"src_id_addr": ["h1"]}), tmp_path / "bad.parquet")
     with pytest.raises(SystemExit, match="missing required columns"):
         features.check_input(duckdb.connect(), str(tmp_path / "*.parquet"))
+
+
+def test_saved_window_and_quantiles_survive_config_changes(tmp_path, monkeypatch):
+    bundle = develop_on(monkeypatch, tmp_path, add_test_rows=True)
+    model_bytes = config.MODEL_PATH.read_bytes()
+    run.test()
+    first = tmp_path / "first_test"
+    shutil.copytree(config.WORK_DIR / "test", first)
+    monkeypatch.setattr(config, "WINDOW_MINUTES", 60)
+    monkeypatch.setattr(config, "REVIEW_QUANTILES", {"Critical": 0.9, "High": 0.8, "Medium": 0.7})
+    run.test()
+    second = config.WORK_DIR / "test"
+
+    columns = ", ".join(["src_ip", "window_start", "window_end"] + features.FEATURES + ["raw_score", "band", "selected"])
+    con = features.connect()
+    before, after = (con.execute(f"SELECT {columns} FROM read_parquet('{folder / 'scores' / '*.parquet'}') "
+                                 f"ORDER BY src_ip, window_start").fetchdf() for folder in (first, second))
+    pd.testing.assert_frame_equal(before, after)
+    assert ((after["window_end"] - after["window_start"]) == pd.Timedelta(minutes=15)).all()
+    summary = json.loads((second / "summary.json").read_text())
+    assert summary["settings"]["window_minutes"] == 15
+    assert summary["model"]["review_quantiles"] == bundle["review_quantiles"] == {"Critical": 0.999, "High": 0.995,
+                                                                                    "Medium": 0.99}
+    assert summary["model"]["reference_band_counts"] == bundle["reference_band_counts"]
+    page = (second / "report.html").read_text(encoding="utf-8")
+    assert "<td>0.995</td>" in page and "<td>0.8</td>" not in page and "15-minute" in page
+    assert config.MODEL_PATH.read_bytes() == model_bytes
+
+    joblib.dump({key: value for key, value in bundle.items() if key != "review_quantiles"}, config.MODEL_PATH)
+    with pytest.raises(SystemExit, match="rerun `python run.py develop`"):
+        run.load_bundle()
+
+
+@pytest.mark.parametrize("days, weekly", [(5, False), (365, True)])
+def test_plots_stay_bounded_and_label_weekly_spans(tmp_path, days, weekly):
+    """Small summary fixtures only: no raw NetFlow is generated for the chart layout check."""
+    rng = np.random.default_rng(1)
+    calendar = pd.date_range("2026-01-01", periods=days, freq="D")
+    active = calendar[rng.random(days) > 0.2]  # inactive days must stay blank, not become zero scores
+    daily = pd.DataFrame({"day": active, "observed_flows": 1000, "host_windows": rng.integers(50, 150, len(active)),
+                          "critical": rng.integers(0, 3, len(active)), "high": rng.integers(0, 5, len(active))})
+    starts = [day.tz_localize("UTC") + pd.Timedelta(hours=h) for day in active for h in range(25)]
+    pq.write_table(pa.table({
+        "src_ip": [f"10.0.0.{h}" for _ in active for h in range(25)],
+        "window_start": pa.array(starts, pa.timestamp("us", tz="UTC")),
+        "raw_score": rng.uniform(0.4, 0.7, len(starts)), "selected": rng.random(len(starts)) < 0.05,
+    }), tmp_path / "scores.parquet")
+    con = duckdb.connect()
+    con.execute("SET TimeZone = 'UTC'")
+
+    assert report.plot_timeline(daily, tmp_path / "timeline.png") is weekly
+    assert report.plot_heatmap(con, f"read_parquet('{tmp_path / 'scores.parquet'}')", tmp_path / "heatmap.png") is weekly
+    for name in ("timeline.png", "heatmap.png"):
+        assert matplotlib.image.imread(tmp_path / name).shape[1] <= 1500
+    table, _ = report.timeline_table(daily)
+    first_period = daily[daily["day"] < table.index[1]]
+    expected = 1000 * (first_period["critical"] + first_period["high"]).sum() / first_period["host_windows"].sum()
+    assert table["flagged_per_1000"].iloc[0] == pytest.approx(expected)
+    assert (table.index.weekday == 0).all() if weekly else len(table) == len(active)

@@ -15,6 +15,7 @@ matplotlib.use("Agg")
 import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
 
 import config  # noqa: E402
 import model  # noqa: E402
@@ -22,6 +23,7 @@ from features import FEATURES, sql_text  # noqa: E402
 
 plt.rcParams.update({"figure.dpi": 110, "axes.grid": True, "grid.alpha": 0.3, "font.size": 9})
 BAND_COLORS = {"Critical": "#b2182b", "High": "#ef8a62", "Medium": "#999999"}
+WEEKLY_AFTER_DAYS = 60  # timeline and heatmap switch to weekly columns above this calendar span
 CANDIDATE_ORDER = "raw_score DESC, max_abs_deviation DESC NULLS LAST, src_ip, window_start"
 
 
@@ -58,32 +60,57 @@ def save(fig, path):
     plt.close(fig)
 
 
+def use_weeks(first_day, last_day):
+    """Weekly display when the calendar span (not the number of active days) exceeds WEEKLY_AFTER_DAYS."""
+    return (pd.Timestamp(last_day) - pd.Timestamp(first_day)).days + 1 > WEEKLY_AFTER_DAYS
+
+
+def monday_of(days):
+    """Monday of each day's week, matching DuckDB date_trunc('week') in UTC."""
+    return days - pd.to_timedelta(days.weekday, unit="D")
+
+
+def date_ticks(axis, span_days):
+    axis.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, span_days // 10)))
+    axis.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+
+
+def timeline_table(daily):
+    """Daily rows, or Monday-start weekly totals for long spans. The rate uses totals, never averaged daily rates."""
+    days = pd.DatetimeIndex(pd.to_datetime(daily["day"]))
+    weekly = use_weeks(days.min(), days.max())
+    data = daily[["observed_flows", "host_windows", "critical", "high"]].set_axis(monday_of(days) if weekly else days)
+    data = data.groupby(level=0).sum()
+    data["flagged"] = data["critical"] + data["high"]
+    data["flagged_per_1000"] = 1000 * data["flagged"] / data["host_windows"]
+    return data, weekly
+
+
 def plot_timeline(daily, path):
-    data = daily.set_index(daily["day"].astype("datetime64[ns]"))
-    data = data[["observed_flows", "host_windows", "critical", "high"]]
-    if len(data) > 60:  # weekly overview for long spans; daily values stay in daily_summary.csv
-        data = data.resample("W").sum()
-    flagged = data["critical"] + data["high"]
+    data, weekly = timeline_table(daily)
+    days = pd.to_datetime(daily["day"])
+    unit = "week" if weekly else "day"
+    flagged = data["flagged"]
     fig, (top, bottom) = plt.subplots(2, 1, figsize=(10, 5.5), sharex=True)
-    top.bar(data.index, data["observed_flows"], color="#9ecae1", width=0.8, label="observed flows")
-    top.set_ylabel("observed flow records")
+    top.bar(data.index, data["observed_flows"], color="#9ecae1", width=0.8 * (7 if weekly else 1),
+            align="edge" if weekly else "center", label=f"observed flows per {unit}")
+    top.set_ylabel(f"observed flow records per {unit}")
     twin = top.twinx()
-    twin.plot(data.index, flagged, color=BAND_COLORS["Critical"], marker="o", label="High+Critical windows")
-    twin.set_ylabel("High+Critical host-windows")
-    bottom.plot(data.index, 1000 * flagged / data["host_windows"], color="black", marker="o")
-    bottom.set_ylabel("High+Critical per 1,000\nactive host-windows")
+    twin.plot(data.index, flagged, color=BAND_COLORS["Critical"], marker="o", label=f"High+Critical windows per {unit}")
+    twin.set_ylabel(f"High+Critical host-windows per {unit}")
+    bottom.plot(data.index, data["flagged_per_1000"], color="black", marker="o")
+    bottom.set_ylabel(f"High+Critical per 1,000\nactive host-windows ({'weekly' if weekly else 'daily'} totals)")
     for start, end in config.PENTEST_INTERVALS:
         for axis in (top, bottom):
             axis.axvspan(np.datetime64(start), np.datetime64(end), color="orange", alpha=0.15)
-    title = "Daily volume and review load (UTC)"
+    title = "Weekly (Monday-start) volume and review load (UTC)" if weekly else "Daily volume and review load (UTC)"
     top.set_title(title + (" - shaded: broad pentest context, not labels" if config.PENTEST_INTERVALS else ""))
     top.legend(loc="upper left")
     twin.legend(loc="upper right")
-    span_days = (data.index.max() - data.index.min()).days + 1
-    bottom.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, span_days // 10)))
-    bottom.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+    date_ticks(bottom, (days.max() - days.min()).days + 1)
     fig.autofmt_xdate()
     save(fig, path)
+    return weekly
 
 
 def plot_distributions(bundle, histogram, label, path):
@@ -119,21 +146,34 @@ def plot_workload(bundle, path):
 
 
 def plot_heatmap(con, scores, path):
-    """Top 20 hosts by candidate count, ties by max raw score then src_ip. Blank = no active window that day."""
+    """Top 20 hosts by candidate count, ties by max raw score then src_ip. Cells: max raw score per host and day,
+    or per Monday-start week for long spans. Blank = no active window of that host in that day/week."""
+    first, last = con.execute(f"SELECT CAST(min(window_start) AS DATE), CAST(max(window_start) AS DATE) "
+                              f"FROM {scores}").fetchone()
+    weekly = use_weeks(first, last)
+    bucket = "CAST(date_trunc('week', window_start) AS DATE)" if weekly else "CAST(window_start AS DATE)"
     hosts = [row[0] for row in con.execute(f"""
         SELECT src_ip FROM {scores} GROUP BY src_ip
         ORDER BY count(*) FILTER (WHERE selected) DESC, max(raw_score) DESC, src_ip LIMIT 20""").fetchall()]
-    cells = con.execute(f"SELECT src_ip, CAST(window_start AS DATE) AS day, max(raw_score) AS max_raw FROM {scores} "
+    cells = con.execute(f"SELECT src_ip, {bucket} AS period, max(raw_score) AS max_raw FROM {scores} "
                         f"WHERE list_contains(?, src_ip) GROUP BY 1, 2", [hosts]).fetchdf()
-    grid = cells.pivot(index="src_ip", columns="day", values="max_raw").reindex(hosts)
-    fig, axis = plt.subplots(figsize=(max(6, 0.5 * grid.shape[1] + 3), 6))
+    cells["period"] = pd.to_datetime(cells["period"])
+    first_column = monday_of(pd.DatetimeIndex([pd.Timestamp(first)]))[0] if weekly else pd.Timestamp(first)
+    columns = pd.date_range(first_column, pd.Timestamp(last), freq="7D" if weekly else "D")
+    grid = cells.pivot(index="src_ip", columns="period", values="max_raw").reindex(index=hosts, columns=columns)
+    fig, axis = plt.subplots(figsize=(13, 6))
     image = axis.imshow(np.ma.masked_invalid(grid.to_numpy(dtype=float)), aspect="auto", cmap="viridis")
+    step = int(np.ceil(len(columns) / 12))
     axis.set_yticks(range(len(hosts)), hosts, fontsize=7)
-    axis.set_xticks(range(grid.shape[1]), [str(day)[:10] for day in grid.columns], rotation=45, ha="right", fontsize=7)
-    fig.colorbar(image, label="max raw score")
-    axis.set_title("Top 20 hosts by candidate count:\ndaily max raw score (blank = inactive)")
+    axis.set_xticks(range(0, len(columns), step), [f"{day:%Y-%m-%d}" for day in columns[::step]],
+                    rotation=45, ha="right", fontsize=8)
+    unit = "week (Monday start, UTC)" if weekly else "UTC day"
+    fig.colorbar(image, label=f"{'weekly' if weekly else 'daily'} max raw score")
+    axis.set_title(f"Top 20 hosts by candidate count: max raw score per host and {unit}\n"
+                   f"(blank = no active window in that {'week' if weekly else 'day'})")
     axis.grid(False)
     save(fig, path)
+    return weekly
 
 
 def plot_detail(con, bundle, scores, top, path):
@@ -220,7 +260,8 @@ def write_report(con, bundle, out, label, period_infos, files, histogram, starte
         "scored_host_windows": stats[0], "candidates": n_candidates, "candidates_by_reason": counts,
         "raw_score_exact": dict(zip(["min", "median", "p99", "max"], stats[1:])),
         "model": {key: bundle[key] for key in ["model_features", "train_sample_rows", "train_sample_days",
-                                               "reference_method", "thresholds", "reference_band_counts"]},
+                                               "reference_method", "review_quantiles", "thresholds",
+                                               "reference_band_counts"]},
         "model_periods_frozen": bundle["periods"], "model_created_utc": bundle["created_utc"],
         "settings": {"window_minutes": bundle["window_minutes"], "forest": bundle["forest_settings"],
                      "large_deviation": bundle["large_deviation"], "score_batch_rows": config.SCORE_BATCH_ROWS,
@@ -236,7 +277,7 @@ def report_html(bundle, label, period_infos, summary, top_rows):
                          [[p["period"], f"{p['start']} .. {p['end']}", f"{p['host_windows']:,}", f"{p['flows']:,}",
                            p["excluded_flows_ending_after_period"]] for p in period_infos])
     bands = table_html(["band", "validation quantile", "raw score >=", "validation reference count"],
-                       [[b, config.REVIEW_QUANTILES.get(b, ""), f"{bundle['thresholds'][b]:.6f}",
+                       [[b, bundle["review_quantiles"][b], f"{bundle['thresholds'][b]:.6f}",
                          bundle["reference_band_counts"][b]] for b in model.BANDS])
     candidates = table_html(["source", "window start (UTC)", "band", "raw score", "validation pct", "priority",
                              "reason", "largest deviations (original units)"],

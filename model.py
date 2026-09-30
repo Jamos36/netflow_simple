@@ -102,10 +102,10 @@ def reference_sample(con, raw_glob, limit, seed):
     return np.sort(np.asarray(scores, dtype=np.float64))
 
 
-def calibrate(reference, validation_rows, validation_days):
+def calibrate(reference, validation_rows, validation_days, quantiles):
     """Raw-score thresholds at validation quantiles, plus achieved counts and the workload table."""
     thresholds = {band: float(np.quantile(reference, q, method="higher"))
-                  for band, q in config.REVIEW_QUANTILES.items()}
+                  for band, q in quantiles.items()}
     bands = assign_bands(reference, thresholds)
     workload = []
     for q in config.WORKLOAD_QUANTILES:

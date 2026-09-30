@@ -88,8 +88,10 @@ def develop():
     files = features.check_input(con, config.INPUT_GLOB)
     out = prepare_output(config.WORK_DIR / "development")
     feature_dir = out / "features"
-    train = features.build_period_features(con, config.INPUT_GLOB, "train", *periods["train"], feature_dir)
-    valid = features.build_period_features(con, config.INPUT_GLOB, "validation", *periods["validation"], feature_dir)
+    window = config.WINDOW_MINUTES
+    train = features.build_period_features(con, config.INPUT_GLOB, "train", *periods["train"], feature_dir, window)
+    valid = features.build_period_features(con, config.INPUT_GLOB, "validation", *periods["validation"],
+                                           feature_dir, window)
 
     sample = model.sample_training_rows(con, str(feature_dir / "train" / "*.parquet"), *periods["train"],
                                         config.TRAIN_SAMPLE_ROWS, config.SAMPLE_SEED)
@@ -99,14 +101,15 @@ def develop():
     bundle["validation_histogram"] = stream_raw_scores(con, bundle, valid_glob, out / "validation_raw_scores")
     reference = model.reference_sample(con, str(out / "validation_raw_scores" / "*.parquet"),
                                        config.VALIDATION_REFERENCE_ROWS, config.SAMPLE_SEED)
-    bundle.update(model.calibrate(reference, valid["host_windows"], valid["days"]))
+    quantiles = dict(config.REVIEW_QUANTILES)  # frozen copy, shown with the thresholds in every report
+    bundle.update(model.calibrate(reference, valid["host_windows"], valid["days"], quantiles))
     bundle.update({
         "reference_scores": reference,
         "reference_method": (f"all {valid['host_windows']:,} validation scores" if len(reference) == valid["host_windows"]
                              else f"hash sample of {len(reference):,} of {valid['host_windows']:,} validation scores"),
         "large_deviation": config.LARGE_DEVIATION, "hist_bins": model.HIST_BINS,
         "forest_settings": dict(config.FOREST_SETTINGS), "raw_columns": dict(features.RAW_COLUMNS),
-        "window_minutes": config.WINDOW_MINUTES,
+        "window_minutes": window, "review_quantiles": quantiles,
         "periods": {name: (f"{a:%Y-%m-%d}", f"{b:%Y-%m-%d}") for name, (a, b) in periods.items()},
         "train_info": train, "validation_info": valid, "development_input_files": files,
         "created_utc": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -119,9 +122,10 @@ def develop():
 def save_bundle(bundle):
     config.MODEL_PATH.parent.mkdir(parents=True, exist_ok=True)
     joblib.dump(bundle, config.MODEL_PATH)
-    settings = {key: bundle[key] for key in ["model_features", "feature_notes", "thresholds", "reference_band_counts",
-                                             "reference_method", "forest_settings", "periods", "window_minutes",
-                                             "train_sample_rows", "train_sample_days", "raw_columns",
+    settings = {key: bundle[key] for key in ["model_features", "feature_notes", "review_quantiles", "thresholds",
+                                             "reference_band_counts", "reference_method", "forest_settings",
+                                             "periods", "window_minutes", "train_sample_rows", "train_sample_days",
+                                             "raw_columns",
                                              "large_deviation", "created_utc", "versions"]}
     (config.MODEL_PATH.parent / "model_settings.json").write_text(json.dumps(settings, indent=2))
 
@@ -129,7 +133,12 @@ def save_bundle(bundle):
 def load_bundle():
     if not config.MODEL_PATH.exists():
         raise SystemExit(f"No saved model at {config.MODEL_PATH}; run `python run.py develop` first")
-    return joblib.load(config.MODEL_PATH)
+    bundle = joblib.load(config.MODEL_PATH)
+    missing = [key for key in ["window_minutes", "review_quantiles", "thresholds"] if key not in bundle]
+    if missing:
+        raise SystemExit(f"{config.MODEL_PATH} is an older model without {', '.join(missing)}; "
+                         f"rerun `python run.py develop`")
+    return bundle
 
 
 def test():
@@ -139,7 +148,8 @@ def test():
     files = features.check_input(con, config.INPUT_GLOB)
     out = prepare_output(config.WORK_DIR / "test")
     start, end = (features.parse_day(day) for day in bundle["periods"]["test"])  # frozen dates, not config.py
-    info = features.build_period_features(con, config.INPUT_GLOB, "test", start, end, out / "features")
+    info = features.build_period_features(con, config.INPUT_GLOB, "test", start, end, out / "features",
+                                          bundle["window_minutes"])
     finish(con, bundle, out, "final test (held-out period)", info["features_dir"] + "/*.parquet", [info], files, started)
 
 
@@ -153,7 +163,7 @@ def score(input_glob, out_dir, start_text=None, end_text=None):
     start = features.parse_day(start_text) if start_text else data_start
     end = features.parse_day(end_text) if end_text else data_end
     info = features.build_period_features(con, input_glob, "new", start, end, out / "features",
-                                          bounded_end=end_text is not None)
+                                          bundle["window_minutes"], bounded_end=end_text is not None)
     if start < features.parse_day(bundle["periods"]["validation"][1]):
         info["note"] = "This range overlaps the development periods; it is not later, independent data."
     finish(con, bundle, out, "new data", info["features_dir"] + "/*.parquet", [info], files, started)

@@ -24,6 +24,8 @@ python run.py score --input '/path/to/later/*.parquet' --out '/path/to/new_resul
 python -m pytest -q
 ```
 
+Requires DuckDB 1.5.6 or newer (older versions lack the Arrow methods used).
+
 `score` can take `--start YYYY-MM-DD --end YYYY-MM-DD` to bound the days. Without `--end`, flows are not cut at
 the period end.
 
@@ -46,6 +48,8 @@ the period end.
 Each analysis has its own folder: `WORK_DIR/development`, `WORK_DIR/test`, or the `--out` folder. **A rerun
 replaces that folder's generated results.** Only folders created by this tool are replaced. `test` and `score` only
 read `model.joblib`; only `develop` writes it, together with `model_settings.json` (settings + package versions).
+`test` and `score` use the window size, test dates and band quantiles saved in the model, so editing `config.py`
+after `develop` does not change them. Rerun `develop` to apply new values; older model files are refused.
 
 `scores/` (every scored host-window), `candidates/candidates.parquet` (all candidates), `top_candidates.csv`
 (top 500), `daily_summary.csv`, `summary.json`, `report.html` with `plots/` (keep them together), and `features/`.
