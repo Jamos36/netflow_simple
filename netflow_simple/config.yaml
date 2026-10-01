@@ -1,0 +1,50 @@
+# Copy/adjust this file for your machine. Paths may be files, directories or recursive globs.
+data:
+  paths:
+    - "D:/netflow/parquet/**/*.parquet"
+  timestamp_column: "flow_start_time" # set to the exact timestamp column in your files
+  timestamp_unit: null                 # only for numeric epoch: s, ms, us or ns
+  exclude_columns: []                  # only add proven IDs/provenance after reviewing the manifest
+  hash_features: 256                   # fixed categorical hashing dimension; collisions are possible
+  batch_rows: 20000                    # Parquet read and score batch size
+  train_sample_rows: 50000             # bounded deterministic sample used for fitting/scaling
+
+split:
+  train_fraction: 0.60
+  validation_fraction: 0.20            # remaining dates are test
+  train_end: null                       # optional explicit UTC date, exclusive
+  validation_end: null                  # optional explicit UTC date, exclusive
+  # Set these if you know a safer cutoff. The broad candidate period is only drawn on plots.
+
+context:
+  pentest_start: null                    # optional exact date; end is exclusive
+  pentest_end: null
+  pentest_months: [8, 9]                 # shade Aug-Sep in plots; context, never a label
+
+models:
+  seed: 42
+  iforest:
+    n_estimators: 200
+    max_samples: 256
+    max_features: 1.0
+    n_jobs: 4
+  pca:
+    max_components: 64
+    explained_variance: 0.95
+  hbos:
+    bins: 20
+  gmm:
+    components: 4
+    max_iter: 50
+    fit_rows: 10000                 # GMM fit sample; scoring still covers every row
+
+review:
+  threshold_quantile: 0.995            # validation reference; provisional if validation contains a pentest
+  critical_quantile: 0.999
+  high_quantile: 0.995
+  medium_quantile: 0.990
+  low_quantile: 0.975
+  top_per_day: 100
+
+output:
+  directory: "../analysis_outputs"      # outside this project; contains scores and candidate flow rows
