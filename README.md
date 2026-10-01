@@ -1,6 +1,6 @@
 # NetFlow all-column anomaly comparison
 
-A small CPU-only prototype that reads Parquet files directly with PyArrow, transforms every available flow column by type, and compares four unsupervised anomaly models. It writes Parquet/CSV/JSON/PNG outputs. There is no DuckDB and no HTML report.
+A small CPU-only prototype that reads Parquet files directly with PyArrow, transforms every available flow column by type, and compares four unsupervised anomaly models. It writes Parquet/CSV/JSON/PNG outputs.
 
 ## What it does
 
