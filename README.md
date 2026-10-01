@@ -11,7 +11,7 @@ A small CPU-only prototype that reads Parquet files directly with PyArrow, trans
 5. Saves daily trend plots, score distributions, daily statistics, scored Parquet, top candidate CSV, fitted model and a manifest for each selected model.
 6. Shades August-September in plots as context only. It is not a label and is not used in fitting.
 
-Because the pentest is known only to be sometime in August or September, the default chronological 60/20/20 split should place training largely in May-July and validation/test in later dates when the supplied data covers May-September evenly. Inspect the printed date boundaries and `manifest.json`. If the automatic boundary puts candidate dates into training, set explicit split dates in the YAML before running. The broad August-September period may overlap validation and test; these are comparison/calibration periods, not trusted-clean data.
+The default chronological 60/20/20 split should place training largely in first portion of data and validation/test in later dates when the supplied data covers later evenly. Inspect the printed date boundaries and `manifest.json`. If the automatic boundary puts candidate dates into training, set explicit split dates in the YAML before running. The broad August-September period may overlap validation and test; these are comparison/calibration periods, not trusted-clean data.
 
 ## Models
 
