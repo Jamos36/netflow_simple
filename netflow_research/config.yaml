@@ -1,0 +1,65 @@
+data:
+  paths: ["data/*.parquet"]
+  timestamp_unit: null # numeric timestamp: s/ms/us/ns; strings must include timezone or mean UTC
+  memory_limit: 2GB
+  threads: 4
+  batch_rows: 20000
+  fit_rows: 15000
+columns:
+  timestamp: flow_start_time
+  end: flow_end_time # optional; annotation only; features here are assigned to observation timestamp
+  src_ip: src_ip
+  dst_ip: dst_ip
+  dst_port: dst_port
+  bytes: bytes
+  packets: packets
+  duration: duration_seconds # seconds; optional, omit shape family if unavailable
+  failure: null # optional 0/1 outcome field; do not infer failure blindly from flags
+  external: null # optional 0/1 field from your network's subnet policy
+features:
+  window_minutes: 1
+  history_days: 7
+  min_history_days: 3
+  seasonal_days: 35
+  timing_hours: 2
+  scale_floor: 0.1
+  short_seconds: 1
+  families: [volume, spread, shape, novelty, baseline, timing]
+  calendar_features: false # compare deliberately; day-of-year is excluded
+  correlation_cutoff: 0.98 # report only; automatic pruning is off
+  drop: []
+  prune_correlated: false
+split:
+  train_end: null # exclusive UTC dates; null uses whole-date 50/20/15/15 split
+  validation_end: null
+  calibration_end: null # untouched test starts here
+models:
+  names: [iforest, pca, hbos, gmm] # all adds robust_pca and autoencoder
+  seed: 42
+  trees: 200
+  max_samples: 512
+  components: [1, 2, 4]
+  covariance: [diag, full]
+  bins: 20
+  pca_ranks: [2, 4, 8] # choose using validation incident-budget stability; labels not consulted
+  rpca_fit_rows: 2000
+  rpca_iterations: 80
+  epochs: 60
+  patience: 8
+  bottleneck: 4
+review:
+  quantiles: [0.99, 0.995, 0.999]
+  incidents_per_day: 10 # provisional calibration budget, not false-positive rate
+  incident_gap_minutes: 2
+  top_windows: 200
+  explained_candidates: 100
+context:
+  pentest_start: null # broad contextual dates only; never treated as labels
+  pentest_end: null
+labels:
+  events_csv: null # event_id,host,start,end; host '*' means all hosts
+  complete: false # true ONLY if all test windows have trustworthy ground truth
+  reviews_csv: null # model,level,host,time,malicious (0/1) for reviewed top candidates
+output: results
+flow_models: [iforest, hbos]
+backtests: [] # [{name: fold1, train_end: ..., validation_end: ..., calibration_end: ...}]

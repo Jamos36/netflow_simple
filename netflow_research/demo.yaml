@@ -1,0 +1,93 @@
+data:
+  paths:
+  - data/demo_*.parquet
+  timestamp_unit: null
+  memory_limit: 2GB
+  threads: 4
+  batch_rows: 20000
+  fit_rows: 15000
+columns:
+  timestamp: flow_start_time
+  end: flow_end_time
+  src_ip: src_ip
+  dst_ip: dst_ip
+  dst_port: dst_port
+  bytes: bytes
+  packets: packets
+  duration: duration_seconds
+  failure: failure
+  external: null
+features:
+  window_minutes: 1
+  history_days: 7
+  min_history_days: 3
+  seasonal_days: 35
+  timing_hours: 2
+  scale_floor: 0.1
+  short_seconds: 1
+  families:
+  - volume
+  - spread
+  - shape
+  - novelty
+  - baseline
+  - timing
+  calendar_features: false
+  correlation_cutoff: 0.98
+  drop: []
+  prune_correlated: false
+split:
+  train_end: '2026-01-15'
+  validation_end: '2026-01-20'
+  calibration_end: '2026-01-24'
+models:
+  names:
+  - iforest
+  - pca
+  - hbos
+  - gmm
+  seed: 42
+  trees: 200
+  max_samples: 512
+  components:
+  - 1
+  - 2
+  - 4
+  covariance:
+  - diag
+  - full
+  bins: 20
+  pca_ranks:
+  - 2
+  - 4
+  - 8
+  rpca_fit_rows: 2000
+  rpca_iterations: 80
+  epochs: 60
+  patience: 8
+  bottleneck: 4
+review:
+  quantiles:
+  - 0.99
+  - 0.995
+  - 0.999
+  incidents_per_day: 10
+  incident_gap_minutes: 2
+  top_windows: 200
+  explained_candidates: 100
+context:
+  pentest_start: '2026-01-26'
+  pentest_end: '2026-01-27'
+labels:
+  events_csv: data/events.csv
+  complete: true
+  reviews_csv: null
+output: results
+flow_models:
+- iforest
+- hbos
+backtests:
+- name: earlier
+  train_end: '2026-01-12'
+  validation_end: '2026-01-17'
+  calibration_end: '2026-01-22'
